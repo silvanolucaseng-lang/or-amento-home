@@ -42,19 +42,11 @@ const GRAPH_URL   = `${GRAPH_BASE}/messages`;
 const GRAPH_MEDIA = `${GRAPH_BASE}/media`;
 
 // ─────────────────────────────────────────────────────────────
-// Identidade visual e dados fixos da empresa
+// Identidade visual
 // ─────────────────────────────────────────────────────────────
 const NAVY  = "#16395C";
 const COBRE = "#B0713A";
 const CINZA = "#555555";
-
-const EMPRESA = {
-  nome: "Home Construtora",
-  telefone: "(83) 98874-2184",
-  email: "contato.homepb@gmail.com",
-  site: "homeempreendimentos.com.br",
-  endereco: "Rua Otacílio Nepomuceno, 600 — Catolé, Sala 1001, 10º andar — Campina Grande/PB"
-};
 
 // Fases da obra (soma 100%)
 const FASES = [
@@ -74,7 +66,7 @@ const num = (v) => Number(v || 0).toLocaleString("pt-BR", { maximumFractionDigit
 // Rota de saúde
 // ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.json({ status: "ok", servico: "home-orcamento-api", versao: "2.0.0" });
+  res.json({ status: "ok", servico: "home-orcamento-api", versao: "2.1.0" });
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -93,7 +85,6 @@ app.post("/leads", async (req, res) => {
     }
 
     let telefone = String(l.tel).replace(/\D/g, "");
-    // Se tem 10-11 dígitos e não começa com 55, prefixa 55 (padrão WhatsApp BR)
     if ((telefone.length === 10 || telefone.length === 11) && !telefone.startsWith("55")) {
       telefone = "55" + telefone;
     }
@@ -168,7 +159,6 @@ app.post("/webhook", async (req, res) => {
 
     const codigo = match[0];
 
-    // Busca o lead completo (tudo que o PDF precisa)
     const r = await pool.query(
       `SELECT codigo, nome, cidade, tipo, padrao, ambientes,
               area_real, area_equiv, total, criado_em
@@ -186,7 +176,6 @@ app.post("/webhook", async (req, res) => {
     const lead = r.rows[0];
     const primeiroNome = (lead.nome || "").split(" ")[0] || "";
 
-    // MARCO 2: tenta enviar o PDF; se falhar, cai no texto (Marco 1)
     try {
       const pdfPath = await gerarPDF(lead);
       const mediaId = await uploadMedia(pdfPath);
@@ -199,7 +188,6 @@ app.post("/webhook", async (req, res) => {
 
       await enviarDocumento(de, mediaId, `Orcamento_${codigo}.pdf`, caption);
 
-      // marca como enviado e limpa o arquivo temporário
       await pool.query(`UPDATE leads SET pdf_enviado = true WHERE codigo = $1`, [codigo]);
       fs.unlink(pdfPath, () => {});
       console.log(`PDF enviado para ${de} (${codigo}).`);
@@ -210,7 +198,7 @@ app.post("/webhook", async (req, res) => {
       const areaFmt  = num(lead.area_real);
       await enviarTexto(de,
         `Olá, ${primeiroNome}! Encontrei seu orçamento (${codigo}).\n\n` +
-        `Área real: ${areaFmt} m²\n` +
+        `Área construída: ${areaFmt} m²\n` +
         `Estimativa de investimento: ${totalFmt}\n\n` +
         `Tivemos um problema ao gerar o documento em PDF, mas nossa equipe entrará em contato. ` +
         `Obrigado por escolher a Home Construtora!`);
@@ -222,143 +210,135 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Gera o PDF da estimativa e devolve o caminho do arquivo
+// Gera o PDF da estimativa (papel timbrado de fundo) e devolve o caminho
 // ─────────────────────────────────────────────────────────────
 function gerarPDF(lead) {
   return new Promise((resolve, reject) => {
     try {
       const codigo = lead.codigo;
       const filePath = path.join("/tmp", `Orcamento_${codigo}.pdf`);
-      const doc = new PDFDocument({ size: "A4", margin: 48 });
+      const doc = new PDFDocument({ size: "A4", margin: 0 });
       const stream = fs.createWriteStream(filePath);
       doc.pipe(stream);
 
-      const larguraUtil = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const x0 = doc.page.margins.left;
+      const PW = doc.page.width;   // ~595 pt
+      const PH = doc.page.height;  // ~842 pt
 
-      // ── CABEÇALHO: logo + título ──
-      const logoPath = path.join(__dirname, "logonavy.png");
-      let headerY = doc.page.margins.top;
-      if (fs.existsSync(logoPath)) {
-        try { doc.image(logoPath, x0, headerY, { height: 34 }); } catch (_) {}
-      } else {
-        doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(16)
-           .text("HOME CONSTRUTORA", x0, headerY + 6);
+      // ── FUNDO: papel timbrado (logo topo + marca d'água + rodapé com dados) ──
+      const timbradoPath = path.join(__dirname, "timbrado.png");
+      if (fs.existsSync(timbradoPath)) {
+        try { doc.image(timbradoPath, 0, 0, { width: PW, height: PH }); } catch (_) {}
       }
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(13)
-         .text("ESTIMATIVA DE INVESTIMENTO", x0, headerY, { width: larguraUtil, align: "right" });
+
+      // ── ÁREA ÚTIL (miolo, sem colidir com cabeçalho/rodapé do timbrado) ──
+      const ML = 56;
+      const MR = 56;
+      const larguraUtil = PW - ML - MR;
+      const x0 = ML;
+      const TOP = 135;               // abaixo da logo do timbrado
+      const BOTTOM_LIMITE = 735;     // acima do rodapé do timbrado
+
+      // ── TÍTULO do documento ──
+      let y = TOP;
+      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(16)
+         .text("ESTIMATIVA DE INVESTIMENTO", x0, y, { width: larguraUtil, align: "left" });
+      y += 22;
       const dataStr = new Date(lead.criado_em || Date.now()).toLocaleDateString("pt-BR");
-      doc.fillColor(CINZA).font("Helvetica").fontSize(9)
-         .text(`Código ${codigo}  •  ${dataStr}`, x0, headerY + 18, { width: larguraUtil, align: "right" });
+      doc.fillColor(CINZA).font("Helvetica").fontSize(9.5)
+         .text(`Código ${codigo}  •  ${dataStr}`, x0, y);
+      y += 16;
+      doc.moveTo(x0, y).lineTo(x0 + larguraUtil, y).lineWidth(2).strokeColor(COBRE).stroke();
+      y += 16;
 
-      doc.moveTo(x0, headerY + 46).lineTo(x0 + larguraUtil, headerY + 46)
-         .lineWidth(2).strokeColor(COBRE).stroke();
-
-      doc.y = headerY + 62;
-
-      // ── DADOS DO CLIENTE / IMÓVEL ──
-      const boxTop = doc.y;
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(10).text("DADOS DO CLIENTE", x0, boxTop);
+      // ── DADOS DO CLIENTE / IMÓVEL (2 colunas) ──
+      const colW = larguraUtil / 2;
+      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(10).text("DADOS DO CLIENTE", x0, y);
+      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(10).text("IMÓVEL", x0 + colW, y);
+      const yc = y + 14;
       doc.fillColor("#222").font("Helvetica").fontSize(10);
-      doc.text(lead.nome || "-", x0, doc.y + 2);
-      if (lead.cidade) doc.text(lead.cidade, x0, doc.y + 1);
-
-      const colDir = x0 + larguraUtil / 2;
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(10).text("IMÓVEL", colDir, boxTop);
+      doc.text(lead.nome || "-", x0, yc, { width: colW - 10 });
+      if (lead.cidade) doc.text(lead.cidade, x0, doc.y + 1, { width: colW - 10 });
+      const yClienteFim = doc.y;
       doc.fillColor("#222").font("Helvetica").fontSize(10);
-      doc.text(`Tipo: ${lead.tipo || "-"}`, colDir, boxTop + 14);
-      doc.text(`Padrão: ${lead.padrao || "-"}`, colDir, doc.y + 1);
+      doc.text(`Tipo: ${lead.tipo || "-"}`, x0 + colW, yc, { width: colW - 10 });
+      doc.text(`Padrão: ${lead.padrao || "-"}`, x0 + colW, doc.y + 1, { width: colW - 10 });
+      y = Math.max(yClienteFim, doc.y) + 14;
 
-      doc.moveDown(1.2);
-
-      // ── AMBIENTES ──
+      // ── AMBIENTES (mantém "Área externa" na lista, conforme pedido) ──
       let ambientes = [];
       try {
         ambientes = typeof lead.ambientes === "string" ? JSON.parse(lead.ambientes) : (lead.ambientes || []);
       } catch (_) { ambientes = []; }
 
       if (Array.isArray(ambientes) && ambientes.length) {
-        doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Ambientes", x0);
-        doc.moveDown(0.3);
+        doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Ambientes", x0, y);
+        y = doc.y + 4;
         doc.font("Helvetica").fontSize(10).fillColor("#333");
         ambientes.forEach(a => {
           const nome = a.nome || a.label || "Ambiente";
           const qtd  = a.qtd || a.quantidade || 1;
           const area = a.area != null ? a.area : (a.m2 != null ? a.m2 : null);
-          const linha = area != null
-            ? `${qtd}× ${nome} — ${num(area)} m²`
-            : `${qtd}× ${nome}`;
-          doc.text(linha, x0 + 8);
+          const linha = area != null ? `${qtd}× ${nome} — ${num(area)} m²` : `${qtd}× ${nome}`;
+          doc.text(linha, x0 + 8, y);
+          y = doc.y;
         });
-        doc.moveDown(0.6);
+        y += 10;
       }
 
-      // ── ÁREAS ──
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Áreas", x0);
-      doc.moveDown(0.3);
+      // ── ÁREAS (área CONSTRUÍDA = area_real do banco; NÃO re-somar ambientes) ──
+      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Áreas", x0, y);
+      y = doc.y + 4;
       doc.font("Helvetica").fontSize(10).fillColor("#333");
-      doc.text(`Área real construída:  ${num(lead.area_real)} m²`, x0 + 8);
-      doc.text(`Área equivalente de custo:  ${num(lead.area_equiv)} m²`, x0 + 8);
-      doc.moveDown(0.8);
+      doc.text(`Área construída:  ${num(lead.area_real)} m²`, x0 + 8, y);
+      y = doc.y + 1;
+      doc.text(`Área equivalente de custo:  ${num(lead.area_equiv)} m²`, x0 + 8, y);
+      y = doc.y + 14;
 
-      // ── DISTRIBUIÇÃO POR FASES DA OBRA (tabela) ──
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Distribuição por fases da obra", x0);
-      doc.moveDown(0.4);
+      // ── TABELA — DISTRIBUIÇÃO POR FASES DA OBRA ──
+      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(11).text("Distribuição por fases da obra", x0, y);
+      y = doc.y + 6;
 
       const total = Number(lead.total || 0);
-      const tblX = x0;
-      const colPctW = 60;
-      const colValW = 130;
+      const colPctW = 55;
+      const colValW = 125;
       const colNomeW = larguraUtil - colPctW - colValW;
-      let ty = doc.y;
 
-      // Cabeçalho da tabela
-      doc.rect(tblX, ty, larguraUtil, 20).fill(NAVY);
+      // cabeçalho da tabela
+      doc.rect(x0, y, larguraUtil, 20).fill(NAVY);
       doc.fillColor("#fff").font("Helvetica-Bold").fontSize(9);
-      doc.text("FASE", tblX + 8, ty + 6, { width: colNomeW - 8 });
-      doc.text("%", tblX + colNomeW, ty + 6, { width: colPctW, align: "center" });
-      doc.text("VALOR", tblX + colNomeW + colPctW, ty + 6, { width: colValW - 8, align: "right" });
-      ty += 20;
+      doc.text("FASE", x0 + 8, y + 6, { width: colNomeW - 8 });
+      doc.text("%", x0 + colNomeW, y + 6, { width: colPctW, align: "center" });
+      doc.text("VALOR", x0 + colNomeW + colPctW, y + 6, { width: colValW - 8, align: "right" });
+      y += 20;
 
       doc.font("Helvetica").fontSize(9.5);
       FASES.forEach((f, i) => {
         const valor = total * f.pct;
-        if (i % 2 === 0) doc.rect(tblX, ty, larguraUtil, 18).fill("#F2F5F8");
+        if (i % 2 === 0) doc.rect(x0, y, larguraUtil, 17).fill("#F2F5F8");
         doc.fillColor("#222");
-        doc.text(f.nome, tblX + 8, ty + 5, { width: colNomeW - 8 });
-        doc.text(`${(f.pct * 100).toFixed(0)}%`, tblX + colNomeW, ty + 5, { width: colPctW, align: "center" });
-        doc.text(brl(valor), tblX + colNomeW + colPctW, ty + 5, { width: colValW - 8, align: "right" });
-        ty += 18;
+        doc.text(f.nome, x0 + 8, y + 4.5, { width: colNomeW - 8 });
+        doc.text(`${(f.pct * 100).toFixed(0)}%`, x0 + colNomeW, y + 4.5, { width: colPctW, align: "center" });
+        doc.text(brl(valor), x0 + colNomeW + colPctW, y + 4.5, { width: colValW - 8, align: "right" });
+        y += 17;
       });
-      doc.y = ty + 6;
+      y += 8;
 
       // ── VALOR TOTAL (destaque) ──
-      const totalBoxY = doc.y;
-      doc.rect(tblX, totalBoxY, larguraUtil, 34).fill(NAVY);
-      doc.fillColor("#fff").font("Helvetica-Bold").fontSize(11)
-         .text("ESTIMATIVA TOTAL DE INVESTIMENTO", tblX + 12, totalBoxY + 11);
-      doc.fillColor(COBRE).font("Helvetica-Bold").fontSize(15)
-         .text(brl(total), tblX, totalBoxY + 9, { width: larguraUtil - 12, align: "right" });
-      doc.y = totalBoxY + 46;
+      doc.rect(x0, y, larguraUtil, 32).fill(NAVY);
+      doc.fillColor("#fff").font("Helvetica-Bold").fontSize(10.5)
+         .text("ESTIMATIVA TOTAL DE INVESTIMENTO", x0 + 12, y + 10.5);
+      doc.fillColor(COBRE).font("Helvetica-Bold").fontSize(14)
+         .text(brl(total), x0, y + 9, { width: larguraUtil - 12, align: "right" });
+      y += 44;
 
-      // ── RODAPÉ: disclaimer + dados da empresa (fixo no fim da página) ──
-      const footerY = doc.page.height - doc.page.margins.bottom - 78;
-      doc.moveTo(x0, footerY).lineTo(x0 + larguraUtil, footerY)
-         .lineWidth(0.5).strokeColor("#CCC").stroke();
-
-      doc.fillColor(CINZA).font("Helvetica-Oblique").fontSize(8)
+      // ── DISCLAIMER (validade) — logo acima do rodapé do timbrado ──
+      const discY = Math.min(y, BOTTOM_LIMITE - 30);
+      doc.fillColor(CINZA).font("Helvetica-Oblique").fontSize(7.5)
          .text(
            "Estimativa preliminar gerada automaticamente. Válida por 15 dias e sujeita a projeto executivo. " +
            "Os valores podem variar conforme detalhamento do projeto, condições do terreno e especificações de acabamento.",
-           x0, footerY + 8, { width: larguraUtil, align: "center" }
+           x0, discY, { width: larguraUtil, align: "center" }
          );
-
-      doc.fillColor(NAVY).font("Helvetica-Bold").fontSize(9)
-         .text(EMPRESA.nome, x0, footerY + 32, { width: larguraUtil, align: "center" });
-      doc.fillColor(CINZA).font("Helvetica").fontSize(8);
-      doc.text(`Tel: ${EMPRESA.telefone}  •  E-mail: ${EMPRESA.email}  •  ${EMPRESA.site}`,
-               x0, footerY + 44, { width: larguraUtil, align: "center" });
-      doc.text(EMPRESA.endereco, x0, footerY + 55, { width: larguraUtil, align: "center" });
 
       doc.end();
       stream.on("finish", () => resolve(filePath));
